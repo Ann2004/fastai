@@ -72,6 +72,14 @@ pre-commit installed at .git/hooks/pre-commit
 git commit -m 'Message' --no-verify
 ```
 
+## Как подключить фронтенд локально
+
+Фронтенду для работы нужны статические файлы (HTML, JS, CSS) и файл настроек
+`frontend-settings.json`. Браузер скачивает их с веб-сервера, а затем обращается
+к API бэкенда по префиксу `/frontend-api/`.
+
+[Инструкция по подключению фронтенда](https://dvmn.org/filer/canonical/1750917104/1034/).
+
 ## Как вести разработку
 
 Код проекта находится в папке `/src`.
