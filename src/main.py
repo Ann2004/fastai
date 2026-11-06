@@ -8,6 +8,9 @@ from fastapi import APIRouter, FastAPI, Path as FastPath
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, PositiveInt, StringConstraints
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import RedirectResponse
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -20,6 +23,17 @@ SiteTitle = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=100),
 ]
+
+
+class NormalizePathMiddleware(BaseHTTPMiddleware):
+    """Схлопывает повторные слэши в пути запроса до роутинга."""
+    async def dispatch(self, request: Request, call_next):
+        if "//" in request.url.path:
+            fixed = request.url.path
+            while "//" in fixed:
+                fixed = fixed.replace("//", "/")
+            return RedirectResponse(url=str(request.url.replace(path=fixed)), status_code=307)
+        return await call_next(request)
 
 
 class UserMe(BaseModel):
@@ -48,11 +62,11 @@ class UserMe(BaseModel):
 
 SITE_EXAMPLE = {
     "createdAt": "2025-06-15T18:29:56+00:00",
-    "htmlCodeDownloadUrl": "https://www.google.com/",
-    "htmlCodeUrl": "https://www.google.com/",
+    "htmlCodeDownloadUrl": "https://dvmn.org/media/filer_public/d1/4b/d14bb4e8-d8b4-49cb-928d-fd04ecae46da/index.html",
+    "htmlCodeUrl": "https://dvmn.org/media/filer_public/d1/4b/d14bb4e8-d8b4-49cb-928d-fd04ecae46da/index.html",
     "id": 1,
     "prompt": "Сайт любителей играть в домино",
-    "screenshotUrl": "https://www.google.com/",
+    "screenshotUrl": "https://s13.stc.yc.kpcdn.net/share/i/12/13875743/wr-960.webp",
     "title": "Фан клуб Домино",
     "updatedAt": "2025-06-15T18:29:56+00:00",
 }
@@ -77,7 +91,10 @@ class SiteList(BaseModel):
 
 class SiteCreateIn(BaseModel):
     prompt: str = Field(description="Промпт генерации")
-    title: SiteTitle = Field(description="Заголовок сайта")
+    title: SiteTitle | None = Field(
+        default=None,
+        description="Заголовок сайта",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -123,7 +140,11 @@ def get_my_sites():
 @sites_router.post("/create", response_model=Site)
 def create_site(payload: SiteCreateIn):
     """Создать сайт"""
-    return {**SITE_EXAMPLE, "title": payload.title, "prompt": payload.prompt}
+    return {
+        **SITE_EXAMPLE,
+        "title": payload.title or SITE_EXAMPLE["title"],
+        "prompt": payload.prompt,
+    }
 
 
 async def _stream_site_html() -> AsyncGenerator[str, None]:
@@ -162,6 +183,8 @@ app = FastAPI(
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
+
+app.add_middleware(NormalizePathMiddleware)
 
 app.include_router(users_router)
 app.include_router(sites_router)
