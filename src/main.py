@@ -1,20 +1,35 @@
-import asyncio
+import logging
+import os
+import tempfile
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
+import anyio
+import httpx
 from fastapi import APIRouter, FastAPI, Path as FastPath
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from html_page_generator import (
+    AsyncDeepseekClient,
+    AsyncPageGenerator,
+    AsyncUnsplashClient,
+)
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, PositiveInt, StringConstraints
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 
+from env_settings import settings
+
+logger = logging.getLogger("app.generate")
+logger.setLevel(logging.INFO)
+
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-SITE_HTML = STATIC_DIR / "site.html"
+GENERATED_HTML = BASE_DIR / "index.html"
 
 users_router = APIRouter(prefix="/frontend-api/users", tags=["Users"])
 sites_router = APIRouter(prefix="/frontend-api/sites", tags=["Sites"])
@@ -118,6 +133,57 @@ class SiteGenerateIn(BaseModel):
     )
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Инициализация клиентов DeepSeek/Unsplash...")
+
+    unsplash_client = AsyncUnsplashClient.setup(
+        settings.unsplash.client_id.get_secret_value(),
+        timeout=settings.unsplash.timeout,
+    )
+    deepseek_client = AsyncDeepseekClient.setup(
+        settings.deepseek.api_key.get_secret_value(),
+        settings.deepseek.base_url.get_secret_value(),
+        settings.deepseek.model.get_secret_value(),
+    )
+
+    await unsplash_client.__aenter__()
+    await deepseek_client.__aenter__()
+
+    app.state.deepseek_cm = deepseek_client
+    app.state.unsplash_cm = unsplash_client
+
+    try:
+        yield
+    finally:
+        logger.info("Закрытие клиентов DeepSeek/Unsplash...")
+        try:
+            await deepseek_client.__aexit__(None, None, None)
+        except Exception:
+            logger.exception("Ошибка при закрытии DeepSeek клиента")
+        try:
+            await unsplash_client.__aexit__(None, None, None)
+        except Exception:
+            logger.exception("Ошибка при закрытии Unsplash клиента")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".index-", suffix=".html", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 @users_router.get("/me", response_model=UserMe)
 def get_current_user():
     """Получить учетные данные пользователя"""
@@ -147,12 +213,57 @@ def create_site(payload: SiteCreateIn):
     }
 
 
-async def _stream_site_html() -> AsyncGenerator[str, None]:
-    html = SITE_HTML.read_text(encoding="utf-8")
-    chunk_size = 64
-    for i in range(0, len(html), chunk_size):
-        yield html[i : i + chunk_size]
-        await asyncio.sleep(0.05)
+async def _stream_generated_site(user_prompt: str) -> AsyncGenerator[str, None]:
+    generator = AsyncPageGenerator(debug_mode=settings.debug)
+
+    collected_chunks: list[str] = []
+    title_printed = False
+
+    try:
+        async for chunk in generator(user_prompt):
+            collected_chunks.append(chunk)
+            yield chunk
+
+            if not title_printed and generator.html_page.title:
+                logger.info("Заголовок страницы: %r", generator.html_page.title)
+                title_printed = True
+
+    except anyio.get_cancelled_exc_class():
+        logger.warning("Генерация отменена. Сохраняется best-effort результат.")
+        raise
+
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        logger.exception("Ошибка внешнего сервиса: %s", exc)
+        yield "\n\n[ОШИБКА] Внешний сервис недоступен. Попробуйте позже.\n"
+        return
+
+    except Exception as exc:
+        logger.exception("Непредвиденная ошибка генерации: %s", exc)
+        yield "\n\n[ОШИБКА] Внутренняя ошибка генерации.\n"
+        return
+
+    finally:
+        html_to_save: str | None = None
+
+        try:
+            page = getattr(generator, "html_page", None)
+            if page is not None and page.html_code:
+                html_to_save = page.html_code
+        except Exception:
+            logger.exception("Не удалось прочитать generator.html_page.html_code")
+
+        if not html_to_save and collected_chunks:
+            html_to_save = "".join(collected_chunks)
+
+        if html_to_save is not None:
+            with anyio.CancelScope(shield=True):
+                try:
+                    _atomic_write_text(GENERATED_HTML, html_to_save)
+                    logger.info("HTML сохранён в %s (%d байт)", GENERATED_HTML, len(html_to_save))
+                except Exception:
+                    logger.exception("Не удалось сохранить %s", GENERATED_HTML)
+        else:
+            logger.warning("Нечего сохранять: генератор не вернул HTML.")
 
 
 @sites_router.post(
@@ -165,10 +276,17 @@ async def _stream_site_html() -> AsyncGenerator[str, None]:
         },
     },
 )
-async def generate_site(site_id: Annotated[int, FastPath(gt=0, title="ID сайта")], payload: SiteGenerateIn):
-    """Сгенерировать HTML код сайта"""
+async def generate_site(
+    site_id: Annotated[int, FastPath(gt=0, title="ID сайта")],
+    payload: SiteGenerateIn,
+):
+    logger.info("Запрос генерации сайта id=%s, prompt=%r", site_id, payload.prompt)
+
+    if not getattr(generate_site, "_dummy", None):
+        pass
+
     return StreamingResponse(
-        _stream_site_html(),
+        _stream_generated_site(payload.prompt),
         media_type="text/plain; charset=utf-8",
     )
 
@@ -182,6 +300,7 @@ def get_site(site_id: Annotated[int, FastPath(gt=0, title="ID сайта")]):
 app = FastAPI(
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
+    lifespan=lifespan,
 )
 
 app.add_middleware(NormalizePathMiddleware)

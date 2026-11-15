@@ -7,3 +7,6 @@ __pycache__
 tmp*
 .DS_Store
 src/static/
+main1.py
+main copy.py
+src/index.html
