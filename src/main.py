@@ -80,9 +80,9 @@ SITE_EXAMPLE = {
     "htmlCodeDownloadUrl": "https://dvmn.org/media/filer_public/d1/4b/d14bb4e8-d8b4-49cb-928d-fd04ecae46da/index.html",
     "htmlCodeUrl": "https://dvmn.org/media/filer_public/d1/4b/d14bb4e8-d8b4-49cb-928d-fd04ecae46da/index.html",
     "id": 1,
-    "prompt": "Сайт любителей играть в домино",
+    "prompt": "Промптик",
     "screenshotUrl": "https://s13.stc.yc.kpcdn.net/share/i/12/13875743/wr-960.webp",
-    "title": "Фан клуб Домино",
+    "title": "Компьютерный клуб",
     "updatedAt": "2025-06-15T18:29:56+00:00",
 }
 
@@ -213,20 +213,64 @@ def create_site(payload: SiteCreateIn):
     }
 
 
+HTML_START_MARKERS = ("<!DOCTYPE", "<html")
+HTML_END_MARKER = "</html>"
+
+
 async def _stream_generated_site(user_prompt: str) -> AsyncGenerator[str, None]:
     generator = AsyncPageGenerator(debug_mode=settings.debug)
 
     collected_chunks: list[str] = []
     title_printed = False
 
+    pre_html_buffer = ""
+    html_started = False
+    html_finished = False
+
     try:
         async for chunk in generator(user_prompt):
-            collected_chunks.append(chunk)
-            yield chunk
+            if not isinstance(chunk, str):
+                continue
 
-            if not title_printed and generator.html_page.title:
-                logger.info("Заголовок страницы: %r", generator.html_page.title)
-                title_printed = True
+            collected_chunks.append(chunk)
+
+            if not html_started:
+                pre_html_buffer += chunk
+                start_idx = -1
+                for marker in HTML_START_MARKERS:
+                    idx = pre_html_buffer.find(marker)
+                    if idx != -1 and (start_idx == -1 or idx < start_idx):
+                        start_idx = idx
+                if start_idx == -1:
+                    continue
+
+                html_started = True
+                tail = pre_html_buffer[start_idx:]
+                pre_html_buffer = ""
+
+                if not title_printed and generator.html_page.title:
+                    logger.info("Заголовок страницы: %r", generator.html_page.title)
+                    title_printed = True
+
+                end_idx = tail.find(HTML_END_MARKER)
+                if end_idx != -1:
+                    yield tail[: end_idx + len(HTML_END_MARKER)]
+                    html_finished = True
+                    break
+
+                yield tail
+                continue
+
+            if html_finished:
+                continue
+
+            end_idx = chunk.find(HTML_END_MARKER)
+            if end_idx != -1:
+                yield chunk[: end_idx + len(HTML_END_MARKER)]
+                html_finished = True
+                break
+
+            yield chunk
 
     except anyio.get_cancelled_exc_class():
         logger.warning("Генерация отменена. Сохраняется best-effort результат.")
@@ -234,12 +278,14 @@ async def _stream_generated_site(user_prompt: str) -> AsyncGenerator[str, None]:
 
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.exception("Ошибка внешнего сервиса: %s", exc)
-        yield "\n\n[ОШИБКА] Внешний сервис недоступен. Попробуйте позже.\n"
+        if not html_started:
+            yield "[ОШИБКА] Внешний сервис недоступен. Попробуйте позже."
         return
 
-    except Exception as exc:
-        logger.exception("Непредвиденная ошибка генерации: %s", exc)
-        yield "\n\n[ОШИБКА] Внутренняя ошибка генерации.\n"
+    except Exception:
+        logger.exception("Непредвиденная ошибка генерации")
+        if not html_started:
+            yield "[ОШИБКА] Внутренняя ошибка генерации."
         return
 
     finally:
