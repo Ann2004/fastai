@@ -317,6 +317,7 @@ dependencies = [
     { name = "editorconfig-checker" },
     { name = "fastapi", extra = ["standard"] },
     { name = "furl" },
+    { name = "gotenberg-api" },
     { name = "html-page-generator" },
     { name = "pre-commit" },
     { name = "pydantic-settings" },
@@ -329,6 +330,7 @@ requires-dist = [
     { name = "editorconfig-checker", specifier = "==3.2.1" },
     { name = "fastapi", extras = ["standard"], specifier = "==0.115.12" },
     { name = "furl", specifier = ">=2.1.4" },
+    { name = "gotenberg-api", git = "https://github.com/devmanorg/gotenberg-api.git" },
     { name = "html-page-generator", git = "https://github.com/devmanorg/html-page-generator.git" },
     { name = "pre-commit", specifier = ">=4.3.0" },
     { name = "pydantic-settings", specifier = ">=2.16.2" },
@@ -439,6 +441,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/53/e4/203a76fa2ef46cdb0a618295cc115220cbb874229d4d8721068335eb87f0/furl-2.1.4.tar.gz", hash = "sha256:877657501266c929269739fb5f5980534a41abd6bbabcb367c136d1d3b2a6015", size = 57526, upload-time = "2025-03-09T05:36:21.175Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/61/8c/dce3b1b7593858eba995b2dfdb833f872c7f863e3da92aab7128a6b11af4/furl-2.1.4-py2.py3-none-any.whl", hash = "sha256:da34d0b34e53ffe2d2e6851a7085a05d96922b5b578620a37377ff1dbeeb11c8", size = 27550, upload-time = "2025-03-09T05:36:19.928Z" },
+]
+
+[[package]]
+name = "gotenberg-api"
+version = "0.1.0"
+source = { git = "https://github.com/devmanorg/gotenberg-api.git#a463c4af85a603c07c41aff2b12ea6d3945ce245" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
 ]
 
 [[package]]

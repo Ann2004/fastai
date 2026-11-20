@@ -30,6 +30,14 @@ class S3Settings(BaseSettings):
     max_connections: PositiveInt = 10
 
 
+class GotenbergSettings(BaseSettings):
+    base_url: str = "https://demo.gotenberg.dev"
+    timeout: PositiveInt = 15
+    screenshot_width: PositiveInt = 1000
+    screenshot_format: str = "png"
+    wait_delay: PositiveInt = 5
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",
@@ -42,6 +50,7 @@ class AppSettings(BaseSettings):
     deepseek: DeepSeekSettings
     unsplash: UnsplashSettings
     s3: S3Settings
+    gotenberg: GotenbergSettings
     debug: bool = False
 
 

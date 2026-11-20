@@ -11,16 +11,28 @@ import aioboto3
 from aiobotocore.config import AioConfig
 import anyio
 import httpx
-from fastapi import APIRouter, FastAPI, Path as FastPath
+from fastapi import (
+    APIRouter,
+    FastAPI,
+    Path as FastPath,
+)
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from furl import furl
+from gotenberg_api import GotenbergServerError, ScreenshotHTMLRequest
 from html_page_generator import (
     AsyncDeepseekClient,
     AsyncPageGenerator,
     AsyncUnsplashClient,
 )
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, PositiveInt, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    PositiveInt,
+    StringConstraints,
+)
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
@@ -252,6 +264,35 @@ def create_site(payload: SiteCreateIn):
     }
 
 
+async def _make_screenshot(html: str) -> bytes | None:
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.gotenberg.base_url,
+            timeout=settings.gotenberg.timeout,
+        ) as client:
+            files = {
+                "files": ("index.html", html.encode("utf-8"), "text/html"),
+            }
+            data = {
+                "width": str(settings.gotenberg.screenshot_width),
+                "format": settings.gotenberg.screenshot_format,
+                "waitDelay": f"{settings.gotenberg.wait_delay}s",
+            }
+            response = await client.post(
+                "/forms/chromium/screenshot/html",
+                files=files,
+                data=data,
+            )
+            response.raise_for_status()
+            return response.content
+    except httpx.HTTPStatusError as e:
+        logger.error("Gotenberg HTTP error: %s, body: %s", e, e.response.text)
+        return None
+    except Exception:
+        logger.exception("Ошибка при создании скриншота (direct)")
+        return None
+
+
 HTML_START_MARKERS = ("<!DOCTYPE", "<html")
 HTML_END_MARKER = "</html>"
 
@@ -368,6 +409,21 @@ async def _stream_generated_site(
                     )
                 except Exception:
                     logger.exception("Не удалось загрузить HTML в S3")
+
+                try:
+                    screenshot_bytes = await _make_screenshot(html_to_save)
+                    if screenshot_bytes:
+                        async with _s3_client(s3_session, s3_config) as s3:
+                            await s3.put_object(
+                                Bucket=settings.s3.bucket,
+                                Key=SITE_SCREENSHOT_KEY,
+                                Body=screenshot_bytes,
+                                ContentType="image/png",
+                                ContentDisposition="inline",
+                            )
+                        logger.info("Скриншот загружен в S3: %s/%s (%d байт)")
+                except Exception:
+                    logger.exception("Не удалось создать/загрузить скриншот")
         else:
             logger.warning("Нечего сохранять: генератор не вернул HTML.")
 
