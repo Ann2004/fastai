@@ -7,11 +7,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
+import aioboto3
+from aiobotocore.config import AioConfig
 import anyio
 import httpx
 from fastapi import APIRouter, FastAPI, Path as FastPath
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from furl import furl
 from html_page_generator import (
     AsyncDeepseekClient,
     AsyncPageGenerator,
@@ -30,6 +33,24 @@ logger.setLevel(logging.INFO)
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 GENERATED_HTML = BASE_DIR / "index.html"
+
+SITE_HTML_KEY = "index.html"
+SITE_SCREENSHOT_KEY = "screenshot.png"
+
+
+def _object_url(key: str) -> str:
+    return f"{settings.s3.endpoint_url.rstrip('/')}/{settings.s3.bucket}/{key}"
+
+
+def _download_object_url(key: str) -> str:
+    url = furl(_object_url(key))
+    url.args["response-content-disposition"] = "attachment"
+    return url.url
+
+
+HTML_CODE_URL = _object_url(SITE_HTML_KEY)
+HTML_CODE_DOWNLOAD_URL = _download_object_url(SITE_HTML_KEY)
+SCREENSHOT_URL = _object_url(SITE_SCREENSHOT_KEY)
 
 users_router = APIRouter(prefix="/frontend-api/users", tags=["Users"])
 sites_router = APIRouter(prefix="/frontend-api/sites", tags=["Sites"])
@@ -77,11 +98,11 @@ class UserMe(BaseModel):
 
 SITE_EXAMPLE = {
     "createdAt": "2025-06-15T18:29:56+00:00",
-    "htmlCodeDownloadUrl": "https://dvmn.org/media/filer_public/d1/4b/d14bb4e8-d8b4-49cb-928d-fd04ecae46da/index.html",
-    "htmlCodeUrl": "https://dvmn.org/media/filer_public/d1/4b/d14bb4e8-d8b4-49cb-928d-fd04ecae46da/index.html",
+    "htmlCodeDownloadUrl": HTML_CODE_DOWNLOAD_URL,
+    "htmlCodeUrl": HTML_CODE_URL,
     "id": 1,
-    "prompt": "Промптик",
-    "screenshotUrl": "https://s13.stc.yc.kpcdn.net/share/i/12/13875743/wr-960.webp",
+    "prompt": "Промпт генерации",
+    "screenshotUrl": SCREENSHOT_URL,
     "title": "Компьютерный клуб",
     "updatedAt": "2025-06-15T18:29:56+00:00",
 }
@@ -135,7 +156,7 @@ class SiteGenerateIn(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Инициализация клиентов DeepSeek/Unsplash...")
+    logger.info("Инициализация клиентов DeepSeek/Unsplash/S3...")
 
     unsplash_client = AsyncUnsplashClient.setup(
         settings.unsplash.client_id.get_secret_value(),
@@ -153,6 +174,13 @@ async def lifespan(app: FastAPI):
     app.state.deepseek_cm = deepseek_client
     app.state.unsplash_cm = unsplash_client
 
+    app.state.s3_session = aioboto3.Session()
+    app.state.s3_config = AioConfig(
+        connect_timeout=settings.s3.connect_timeout,
+        read_timeout=settings.s3.read_timeout,
+        max_pool_connections=settings.s3.max_connections,
+    )
+
     try:
         yield
     finally:
@@ -165,6 +193,17 @@ async def lifespan(app: FastAPI):
             await unsplash_client.__aexit__(None, None, None)
         except Exception:
             logger.exception("Ошибка при закрытии Unsplash клиента")
+
+
+def _s3_client(s3_session: aioboto3.Session, s3_config: AioConfig):
+    return s3_session.client(
+        "s3",
+        endpoint_url=settings.s3.endpoint_url,
+        aws_access_key_id=settings.s3.access_key.get_secret_value(),
+        aws_secret_access_key=settings.s3.secret_key.get_secret_value(),
+        region_name=settings.s3.region,
+        config=s3_config,
+    )
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -217,7 +256,12 @@ HTML_START_MARKERS = ("<!DOCTYPE", "<html")
 HTML_END_MARKER = "</html>"
 
 
-async def _stream_generated_site(user_prompt: str) -> AsyncGenerator[str, None]:
+async def _stream_generated_site(
+    user_prompt: str,
+    *,
+    s3_session: aioboto3.Session,
+    s3_config: AioConfig,
+) -> AsyncGenerator[str, None]:
     generator = AsyncPageGenerator(debug_mode=settings.debug)
 
     collected_chunks: list[str] = []
@@ -308,6 +352,22 @@ async def _stream_generated_site(user_prompt: str) -> AsyncGenerator[str, None]:
                     logger.info("HTML сохранён в %s (%d байт)", GENERATED_HTML, len(html_to_save))
                 except Exception:
                     logger.exception("Не удалось сохранить %s", GENERATED_HTML)
+
+                try:
+                    async with _s3_client(s3_session, s3_config) as s3:
+                        await s3.put_object(
+                            Bucket=settings.s3.bucket,
+                            Key=SITE_HTML_KEY,
+                            Body=html_to_save.encode("utf-8"),
+                            ContentType="text/html; charset=utf-8",
+                            ContentDisposition="inline",
+                        )
+                    logger.info(
+                        "HTML загружен в S3: %s/%s (%d байт)",
+                        settings.s3.bucket, SITE_HTML_KEY, len(html_to_save),
+                    )
+                except Exception:
+                    logger.exception("Не удалось загрузить HTML в S3")
         else:
             logger.warning("Нечего сохранять: генератор не вернул HTML.")
 
@@ -323,16 +383,18 @@ async def _stream_generated_site(user_prompt: str) -> AsyncGenerator[str, None]:
     },
 )
 async def generate_site(
+    request: Request,
     site_id: Annotated[int, FastPath(gt=0, title="ID сайта")],
     payload: SiteGenerateIn,
 ):
     logger.info("Запрос генерации сайта id=%s, prompt=%r", site_id, payload.prompt)
 
-    if not getattr(generate_site, "_dummy", None):
-        pass
-
     return StreamingResponse(
-        _stream_generated_site(payload.prompt),
+        _stream_generated_site(
+            payload.prompt,
+            s3_session=request.app.state.s3_session,
+            s3_config=request.app.state.s3_config,
+        ),
         media_type="text/plain; charset=utf-8",
     )
 

@@ -54,20 +54,6 @@ $ source .venv/bin/activate  # для Linux
 $ .\.venv\Scripts\activate  # Для Windows
 ```
 
-### Переменные окружения
-
-В файле-шаблоне `example.env` перечислены все необходимые переменные окружения. Создайте файл `.env` и скопируйте в него содержимое файла-шаблона, заменив значения переменных на реальные. Файл `.env` должен быть добавлен в `.gitignore`.
-
-Ключи для сервисов:
-- `DEEPSEEK__API_KEY` - для генерации HTML-кода по запросу пользователя потребуется оплатить доступ к серверам [API DeepSeek](https://api-docs.deepseek.com/quick_start/pricing) и получить ключ доступа.
-- `UNSPLASH__CLIENT_ID` - Unsplash API ключ доступа для поиска изображений в фотостоке. Необходимо зарегестрировать аккаунт по [ссылке](https://unsplash.com/documentation#creating-a-developer-account), создать [demo-приложение](https://unsplash.com/oauth/applications) и получить ключ.
-
-Если вы используете альтернативную инсталляцию DeepSeek, то необходимо также указать её URL-адрес и, если это необходимо, другую LLM-модель:
-- `DEEPSEEK__BASE_URL` - URL-адрес альтернативной инсталляции для запросов к API.
-Если не указан, то по-умолчанию используется https://api.deepseek.com/v1.
-- `DEEPSEEK__MODEL` - название альтернативной модели. Если не указано, то по-умолчанию используется модель deepseek-chat.
-
-
 ### Настройка pre-commit хуков
 
 В репозитории используются хуки [pre-commit](https://pre-commit.com/), чтобы автоматически запускать линтеры и автотесты.
@@ -137,6 +123,84 @@ $ uv lock
 ```shell
 $ make list
 ...
+```
+
+## Установка MinIO
+
+Установите [MinIO](https://www.min.io/download) с официального сайта.
+Следуйте [документации](https://docs.min.io/aistor/installation/) в соответствии с вашей ОС.
+
+Инструкция для Windows:
+
+Запустите MinIO Server из PowerShell.
+```
+.\minio.exe server C:\minio --console-address "127.0.0.1:9001" --address "127.0.0.1:9000"
+```
+- `--address "127.0.0.1:9000"` — API-порт. Сюда будут стучаться программы (aioboto3, curl, браузер при прямом обращении к файлу)
+- `--console-address "127.0.0.1:9001"` — веб-интерфейс для управления бакетами
+
+Установите логин и пароль:
+```
+setx MINIO_ROOT_USER your_username
+setx MINIO_ROOT_PASSWORD your_password
+```
+
+Перейдите в веб-интерфейс по адресу http://localhost:9001/. Создайте первый бакет.
+
+Чтобы сделать бакет публичным, скачайте клиент [mc.exe](https://dl.min.io/aistor/mc/) c официального сайта.
+Содайте подключение с именем myminio, логином и паролем (сервер minio должен быть запущен):
+```
+.\mc.exe alias set myminio http://127.0.0.1:9000 your_username your_password
+```
+Сделайте бакет публичным (укажите название вашего бакета):
+```
+.\mc.exe anonymous set public myminio/bucket-name
+```
+
+Необходимо положить первые файлы в бакет вручную. Это позволит использовать ссылки на файлы в бакете при реализации эндпоинтов.
+- Загрузите в бакет файл 'index.html' через веб-интерфейс.
+- Загрузите в бакет файл 'index.png' через веб-интерфейс.
+
+Примеры публичных адресов для файлов в бакете:
+- http://localhost:9000/bucket-name/index.htm
+- http://localhost:9000/bucket-name/index.png
+
+Выгрузка файлов в бакет с помощью python-кода:
+```
+import asyncio
+import aioboto3
+
+MINIO_ENDPOINT = "http://127.0.0.1:9000"  # API-порт
+ACCESS_KEY = "your-login"               # MINIO_ROOT_USER
+SECRET_KEY = "your-password"               # MINIO_ROOT_PASSWORD
+BUCKET = "bucket-name"                # имя публичного бакета
+KEY = "index.html"                    # путь в бакете
+
+
+async def upload_html():
+    html_content = "<!DOCTYPE html><html><body><h1>Hello from aioboto3!</h1></body></html>"
+    html_bytes = html_content.encode("utf-8")
+
+    session = aioboto3.Session()
+    async with session.client(
+        "s3",
+        endpoint_url=MINIO_ENDPOINT,
+        aws_access_key_id=ACCESS_KEY,
+        aws_secret_access_key=SECRET_KEY,
+        region_name="us-east-1",
+    ) as s3:
+        await s3.put_object(
+            Bucket=BUCKET,
+            Key=KEY,
+            Body=html_bytes,
+            ContentType="text/html",           # MIME-тип для браузера
+            ContentDisposition="inline",        # Открыть, а не скачать
+        )
+
+
+if __name__ == "__main__":
+    asyncio.run(upload_html())
+
 ```
 
 ## Схемы приложения

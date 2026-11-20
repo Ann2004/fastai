@@ -19,6 +19,17 @@ class UnsplashSettings(BaseSettings):
     timeout: PositiveInt = 20
 
 
+class S3Settings(BaseSettings):
+    endpoint_url: str
+    access_key: SecretStr
+    secret_key: SecretStr
+    bucket: str
+    region: str = "us-east-1"
+    connect_timeout: PositiveInt = 10
+    read_timeout: PositiveInt = 30
+    max_connections: PositiveInt = 10
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",
@@ -30,6 +41,7 @@ class AppSettings(BaseSettings):
 
     deepseek: DeepSeekSettings
     unsplash: UnsplashSettings
+    s3: S3Settings
     debug: bool = False
 
 
