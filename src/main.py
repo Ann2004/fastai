@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Annotated
 
 import aioboto3
-from aiobotocore.config import AioConfig
 import anyio
 import httpx
+from aiobotocore.config import AioConfig
 from fastapi import (
     APIRouter,
     FastAPI,
@@ -19,7 +19,6 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from furl import furl
-from gotenberg_api import GotenbergServerError, ScreenshotHTMLRequest
 from html_page_generator import (
     AsyncDeepseekClient,
     AsyncPageGenerator,
@@ -113,7 +112,7 @@ SITE_EXAMPLE = {
     "htmlCodeDownloadUrl": HTML_CODE_DOWNLOAD_URL,
     "htmlCodeUrl": HTML_CODE_URL,
     "id": 1,
-    "prompt": "Промпт генерации",
+    "prompt": "Создай лендинг для пекарни. Сайт должен быть простым и легким, он должен мало весить. На сайте только одна фотография",
     "screenshotUrl": SCREENSHOT_URL,
     "title": "Компьютерный клуб",
     "updatedAt": "2025-06-15T18:29:56+00:00",
