@@ -1,6 +1,17 @@
-# FastAI
+# AI генератор сайтов
 
-## Репозиторий для бэкенд-разработчиков.
+Веб-сайт на FastAPI для генерирации HTML-страниц по текстовому промпту с помощью ИИ.
+
+## Какие сервисы используются
+
+| Сервис | Назначение |
+|--------|-----------|
+| **Deepseek** (через [html_page_generator](https://github.com/devmanorg/html-page-generator)) | Генерация HTML-кода по промпту |
+| **Unsplash** (через [html_page_generator](https://github.com/devmanorg/html-page-generator)) | Подбор изображений для сайта по тематике запроса |
+| **MinIO / S3** | Хранение HTML-файлов и скриншотов, публичная раздача |
+| **Gotenberg** ([gotenberg-api](https://github.com/devmanorg/gotenberg-api)) | Рендеринг скриншота HTML-страницы |
+
+## Репозиторий для бэкенд-разработчиков
 
 Инструкции и справочная информация по разворачиванию локальной инсталляции собраны
 в документе [CONTRIBUTING.md](./CONTRIBUTING.md).
