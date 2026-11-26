@@ -196,11 +196,26 @@ async def lifespan(app: FastAPI):
     app.state.deepseek_cm = deepseek_client
     app.state.unsplash_cm = unsplash_client
 
-    app.state.s3_session = aioboto3.Session()
-    app.state.s3_config = AioConfig(
+    s3_session = aioboto3.Session()
+    s3_config = AioConfig(
         connect_timeout=settings.s3.connect_timeout,
         read_timeout=settings.s3.read_timeout,
         max_pool_connections=settings.s3.max_connections,
+    )
+    s3_cm = s3_session.client(
+        "s3",
+        endpoint_url=settings.s3.endpoint_url,
+        aws_access_key_id=settings.s3.access_key.get_secret_value(),
+        aws_secret_access_key=settings.s3.secret_key.get_secret_value(),
+        region_name=settings.s3.region,
+        config=s3_config,
+    )
+    app.state.s3_cm = s3_cm
+    app.state.s3_client = await s3_cm.__aenter__()
+
+    app.state.gotenberg_client = httpx.AsyncClient(
+        base_url=str(settings.gotenberg.base_url),
+        timeout=settings.gotenberg.timeout,
     )
 
     try:
@@ -215,17 +230,14 @@ async def lifespan(app: FastAPI):
             await unsplash_client.__aexit__(None, None, None)
         except Exception:
             logger.exception("Ошибка при закрытии Unsplash клиента")
-
-
-def _s3_client(s3_session: aioboto3.Session, s3_config: AioConfig):
-    return s3_session.client(
-        "s3",
-        endpoint_url=settings.s3.endpoint_url,
-        aws_access_key_id=settings.s3.access_key.get_secret_value(),
-        aws_secret_access_key=settings.s3.secret_key.get_secret_value(),
-        region_name=settings.s3.region,
-        config=s3_config,
-    )
+        try:
+            await app.state.s3_cm.__aexit__(None, None, None)
+        except Exception:
+            logger.exception("Ошибка при закрытии S3-клиента")
+        try:
+            await app.state.gotenberg_client.aclose()
+        except Exception:
+            logger.exception("Ошибка при закрытии Gotenberg-клиента")
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -274,27 +286,23 @@ def create_site(payload: SiteCreateIn):
     }
 
 
-async def _make_screenshot(html: str) -> bytes | None:
+async def _make_screenshot(client: httpx.AsyncClient, html: str) -> bytes | None:
     try:
-        async with httpx.AsyncClient(
-            base_url=settings.gotenberg.base_url,
-            timeout=settings.gotenberg.timeout,
-        ) as client:
-            files = {
-                "files": ("index.html", html.encode("utf-8"), "text/html"),
-            }
-            data = {
-                "width": str(settings.gotenberg.screenshot_width),
-                "format": settings.gotenberg.screenshot_format,
-                "waitDelay": f"{settings.gotenberg.wait_delay}s",
-            }
-            response = await client.post(
-                "/forms/chromium/screenshot/html",
-                files=files,
-                data=data,
-            )
-            response.raise_for_status()
-            return response.content
+        files = {
+            "files": ("index.html", html.encode("utf-8"), "text/html"),
+        }
+        data = {
+            "width": str(settings.gotenberg.screenshot_width),
+            "format": settings.gotenberg.screenshot_format,
+            "waitDelay": f"{settings.gotenberg.wait_delay}s",
+        }
+        response = await client.post(
+            "/forms/chromium/screenshot/html",
+            files=files,
+            data=data,
+        )
+        response.raise_for_status()
+        return response.content
     except httpx.HTTPStatusError as e:
         logger.error("Gotenberg HTTP error: %s, body: %s", e, e.response.text)
         return None
@@ -310,8 +318,8 @@ HTML_END_MARKER = "</html>"
 async def _stream_generated_site(
     user_prompt: str,
     *,
-    s3_session: aioboto3.Session,
-    s3_config: AioConfig,
+    s3_client,
+    gotenberg_client: httpx.AsyncClient,
 ) -> AsyncGenerator[str, None]:
     generator = AsyncPageGenerator(debug_mode=settings.debug)
 
@@ -405,14 +413,13 @@ async def _stream_generated_site(
                     logger.exception("Не удалось сохранить %s", GENERATED_HTML)
 
                 try:
-                    async with _s3_client(s3_session, s3_config) as s3:
-                        await s3.put_object(
-                            Bucket=settings.s3.bucket,
-                            Key=SITE_HTML_KEY,
-                            Body=html_to_save.encode("utf-8"),
-                            ContentType="text/html; charset=utf-8",
-                            ContentDisposition="inline",
-                        )
+                    await s3_client.put_object(
+                        Bucket=settings.s3.bucket,
+                        Key=SITE_HTML_KEY,
+                        Body=html_to_save.encode("utf-8"),
+                        ContentType="text/html; charset=utf-8",
+                        ContentDisposition="inline",
+                    )
                     logger.info(
                         "HTML загружен в S3: %s/%s (%d байт)",
                         settings.s3.bucket, SITE_HTML_KEY, len(html_to_save),
@@ -421,17 +428,19 @@ async def _stream_generated_site(
                     logger.exception("Не удалось загрузить HTML в S3")
 
                 try:
-                    screenshot_bytes = await _make_screenshot(html_to_save)
+                    screenshot_bytes = await _make_screenshot(gotenberg_client, html_to_save)
                     if screenshot_bytes:
-                        async with _s3_client(s3_session, s3_config) as s3:
-                            await s3.put_object(
-                                Bucket=settings.s3.bucket,
-                                Key=SITE_SCREENSHOT_KEY,
-                                Body=screenshot_bytes,
-                                ContentType=SCREENSHOT_CONTENT_TYPE,
-                                ContentDisposition="inline",
-                            )
-                        logger.info("Скриншот загружен в S3: %s/%s (%d байт)")
+                        await s3_client.put_object(
+                            Bucket=settings.s3.bucket,
+                            Key=SITE_SCREENSHOT_KEY,
+                            Body=screenshot_bytes,
+                            ContentType=SCREENSHOT_CONTENT_TYPE,
+                            ContentDisposition="inline",
+                        )
+                        logger.info(
+                            "Скриншот загружен в S3: %s/%s (%d байт)",
+                            settings.s3.bucket, SITE_SCREENSHOT_KEY, len(screenshot_bytes),
+                        )
                 except Exception:
                     logger.exception("Не удалось создать/загрузить скриншот")
         else:
@@ -458,8 +467,8 @@ async def generate_site(
     return StreamingResponse(
         _stream_generated_site(
             payload.prompt,
-            s3_session=request.app.state.s3_session,
-            s3_config=request.app.state.s3_config,
+            s3_client=request.app.state.s3_client,
+            gotenberg_client=request.app.state.gotenberg_client,
         ),
         media_type="text/plain; charset=utf-8",
     )
