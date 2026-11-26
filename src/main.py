@@ -36,7 +36,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 
-from env_settings import settings
+from env_settings import SCREENSHOT_EXT, SCREENSHOT_MIME, settings
 
 logger = logging.getLogger("app.generate")
 logger.setLevel(logging.INFO)
@@ -44,9 +44,6 @@ logger.setLevel(logging.INFO)
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 GENERATED_HTML = BASE_DIR / "index.html"
-
-SITE_HTML_KEY = "index.html"
-SITE_SCREENSHOT_KEY = "screenshot.png"
 
 
 def _object_url(key: str) -> str:
@@ -58,6 +55,18 @@ def _download_object_url(key: str) -> str:
     url.args["response-content-disposition"] = "attachment"
     return url.url
 
+
+def _screenshot_key() -> str:
+    return f"screenshot.{SCREENSHOT_EXT[settings.gotenberg.screenshot_format]}"
+
+
+def _screenshot_content_type() -> str:
+    return SCREENSHOT_MIME[settings.gotenberg.screenshot_format]
+
+
+SITE_HTML_KEY = "index.html"
+SITE_SCREENSHOT_KEY = _screenshot_key()
+SCREENSHOT_CONTENT_TYPE = _screenshot_content_type()
 
 HTML_CODE_URL = _object_url(SITE_HTML_KEY)
 HTML_CODE_DOWNLOAD_URL = _download_object_url(SITE_HTML_KEY)
@@ -419,7 +428,7 @@ async def _stream_generated_site(
                                 Bucket=settings.s3.bucket,
                                 Key=SITE_SCREENSHOT_KEY,
                                 Body=screenshot_bytes,
-                                ContentType="image/png",
+                                ContentType=SCREENSHOT_CONTENT_TYPE,
                                 ContentDisposition="inline",
                             )
                         logger.info("Скриншот загружен в S3: %s/%s (%d байт)")

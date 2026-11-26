@@ -4,12 +4,23 @@ from typing import Annotated, Literal
 from pydantic import AfterValidator, HttpUrl, PositiveInt, SecretStr, StringConstraints
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# from typing_extensions import Annotated
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 NonEmptyStr = Annotated[str, StringConstraints(min_length=1, strip_whitespace=True)]
 StrHttpUrl = Annotated[HttpUrl, AfterValidator(str)]
+ScreenshotFormat = Literal["png", "jpeg", "webp"]
+
+SCREENSHOT_MIME: dict[ScreenshotFormat, str] = {
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+}
+
+SCREENSHOT_EXT: dict[ScreenshotFormat, str] = {
+    "png": "png",
+    "jpeg": "jpg",
+    "webp": "webp",
+}
 
 
 class DeepSeekSettings(BaseSettings):
@@ -40,7 +51,7 @@ class GotenbergSettings(BaseSettings):
     base_url: StrHttpUrl = "https://demo.gotenberg.dev"
     timeout: PositiveInt = 15
     screenshot_width: PositiveInt = 1000
-    screenshot_format: Literal["png", "jpeg", "webp"] = "png"
+    screenshot_format: ScreenshotFormat = "png"
     wait_delay: PositiveInt = 5
 
 
